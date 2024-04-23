@@ -246,6 +246,14 @@ def create_parser():
         help="Extra condor submit commands to add to gw_summary submit file. "
              "Can be given multiple times in the form \"key=value\"",
     )
+    htcopts.add_argument(
+        '--use-scitoken',
+        action='store_true',
+        default=False,
+        help="Use SciToken credentials. If this is True, the environmental variables "
+             "SCITOKEN_ISSUER, SCITOKEN_ROLE and SCITOKEN_CREDKEY must be set."
+             "default: %(default)s",
+    )
 
     # configuration options
     copts.add_argument(
@@ -474,19 +482,31 @@ def main(args=None):
         args.config_file[i] = ','.join(inicopy)
     logger.debug("Copied all INI configuration files to %s" % etcdir)
 
-    # -- configure X509 and kerberos for condor -----
+    # -- configure scitkoen or X509 and kerberos for condor -----
 
     if args.universe != 'local':
-        # copy X509 grid certificate into local location
-        (x509cert, _) = find_credential()
-        x509copy = os.path.join(etcdir, os.path.basename(x509cert))
-        shutil.copyfile(x509cert, x509copy)
+        # check if using scitoken, otherwise use X509
+        if args.use_scitoken:
+            scitoken_issuer = os.environ.get('SCITOKEN_ISSUER')
+            scitoken_role = os.environ.get('SCITOKEN_ROLE')
+            scitoken_credkey = os.environ.get('SCITOKEN_CREDKEY')
+            if scitoken_role and scitoken_credkey and scitoken_issuer:
+                logger.info("Configured Condor for SciToken credentials")
+            else: 
+                logger.error("To use scitokens, SCITOKEN_ISSUER, SCITOKEN_ROLE "
+                             "and SCITOKEN_CREDKEY environmental variables must be set")
+                return 1
+        else:
+            # copy X509 grid certificate into local location
+            (x509cert, _) = find_credential()
+            x509copy = os.path.join(etcdir, os.path.basename(x509cert))
+            shutil.copyfile(x509cert, x509copy)
 
-        # rerun kerberos with new path
-        krb5cc = os.path.abspath(os.path.join(etcdir, 'krb5cc.krb5'))
-        gwkerberos.kinit(krb5ccname=krb5cc)
-        logger.debug("Configured Condor and Kerberos "
-                     "for NFS-shared credentials")
+            # rerun kerberos with new path
+            krb5cc = os.path.abspath(os.path.join(etcdir, 'krb5cc.krb5'))
+            gwkerberos.kinit(krb5ccname=krb5cc)
+            logger.debug("Configured Condor and Kerberos "
+                        "for NFS-shared credentials")
 
     # -- build DAG ----------------------------------
 
@@ -508,16 +528,32 @@ def main(args=None):
         (key, value) = cmd_.split('=', 1)
         condorcmds[key.rstrip().lower()] = value.strip()
 
+    # scitoken condor commands raises error in the local universe
+    # to avoid this we add them to a different dictionary and later
+    # add them to condorcmds if the universe is not local
+    scitokencmds = {}
     if args.universe != 'local':
-        # add X509 to environment
-        for (env_, val_) in zip(['X509_USER_PROXY', 'KRB5CCNAME'],
-                                [os.path.abspath(x509copy), krb5cc]):
-            condorenv = '%s=%s' % (env_, val_)
-            if ('environment' in condorcmds and
-                    env_ not in condorcmds['environment']):
-                condorcmds['environment'] += ';%s' % condorenv
-            elif 'environment' not in condorcmds:
-                condorcmds['environment'] = condorenv
+        if args.use_scitoken:
+            # add scitoken to environment
+            if scitoken_role and scitoken_credkey and scitoken_issuer:
+                scitokencmds['environment'] = ('"BEARER_TOKEN_FILE='
+                    f'$$(CondorScratchDir)/.condor_creds/{scitoken_issuer}.use"')
+                scitokencmds['use_oauth_services'] = scitoken_issuer
+                scitokencmds[f'{scitoken_issuer}_oauth_options'] = f'--role {scitoken_role} --credkey {scitoken_credkey}'
+            else: 
+                logger.error("To use scitokens, SCITOKEN_ISSUER, SCITOKEN_ROLE "
+                             "and SCITOKEN_CREDKEY environmental variables must be set")
+                return 1
+        else:
+            # add X509 to environment
+            for (env_, val_) in zip(['X509_USER_PROXY', 'KRB5CCNAME'],
+                                    [os.path.abspath(x509copy), krb5cc]):
+                condorenv = '%s=%s' % (env_, val_)
+                if ('environment' in condorcmds and
+                        env_ not in condorcmds['environment']):
+                    condorcmds['environment'] += ';%s' % condorenv
+                elif 'environment' not in condorcmds:
+                    condorcmds['environment'] = condorenv
 
     # -- build individual gw_summary jobs -----------
 
@@ -530,6 +566,10 @@ def main(args=None):
             tag='%s_local' % args.file_tag, **condorcmds)
         jobs.append(htmljob)
     if not args.html_wrapper_only:
+        if universe != 'local':
+            # add scitoken commands to condorcmds
+            condorcmds.update(scitokencmds)
+
         datajob = GWSummaryJob(
             universe, subdir=outdir, logdir=logdir,
             tag=args.file_tag, **condorcmds)
