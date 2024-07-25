@@ -22,6 +22,7 @@ This module mainly declares the resources used by standard on HTML pages
 """
 
 from collections import OrderedDict
+import pkg_resources
 
 __author__ = 'Duncan Macleod <duncan.macleod@ligo.org>'
 __credits__ = ('Alex Urban <alexander.urban@ligo.org>,'
@@ -53,6 +54,7 @@ JS = OrderedDict((
                    'bootstrap-datepicker.min.js'),
     ('gwbootstrap', 'https://cdn.jsdelivr.net/npm/gwbootstrap@1.3.7/'
                     'lib/gwbootstrap-extra.min.js'),
+    ('fancybox-custom', pkg_resources.resource_filename(__name__, 'fancybox.js')),
 ))
 
 
